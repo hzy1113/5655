@@ -1,0 +1,5 @@
+[default]
+Name = Default
+Type = app
+Offset = 0x10000
+Size = 2M
