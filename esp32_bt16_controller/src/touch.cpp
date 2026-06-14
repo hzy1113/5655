@@ -5,188 +5,123 @@ TouchHandler::TouchHandler(AmplifierControl* amp)
     , m_locked(false)
     , m_lockUnlockTime(0)
 {
-    for (int i = 0; i < 6; i++) {
-        m_touchStates[i] = false;
-        m_touchChanged[i] = false;
-        m_touchPressTime[i] = 0;
-        m_lastTapTime[i] = 0;
-        m_tapCount[i] = 0;
-        m_longPressTriggered[i] = false;
-        m_longPress2Triggered[i] = false;
-    }
 }
 
 void TouchHandler::begin() {
-    for (int i = 0; i < 6; i++) {
-        pinMode(m_touchPins[i], INPUT);
-    }
+    pinMode(TOUCH_PIN_1, INPUT);
+    pinMode(TOUCH_PIN_2, INPUT);
 }
 
 void TouchHandler::update() {
     if (m_locked) {
-        // 锁屏模式下只响应LOCK键（解锁）
-        bool lockState = digitalRead(TOUCH_PIN_LOCK) == HIGH;
-        unsigned long now = millis();
-
-        if (lockState && !m_touchStates[5]) {
-            // LOCK键按下
-            m_touchStates[5] = true;
-            m_touchPressTime[5] = now;
-        } else if (!lockState && m_touchStates[5]) {
-            // LOCK键释放
-            m_touchStates[5] = false;
-
-            // 检测是否快速按两下
-            if (now - m_lastTapTime[5] < TAP_TIMEOUT) {
-                m_tapCount[5]++;
-                if (m_tapCount[5] >= 2) {
-                    unlock();
-                    m_tapCount[5] = 0;
-                }
-            } else {
-                m_tapCount[5] = 1;
-            }
-            m_lastTapTime[5] = now;
-        }
-
-        // 长按3秒也解锁
-        if (m_touchStates[5] && (now - m_touchPressTime[5] >= LONG_PRESS_TIME_3)) {
-            if (!m_longPressTriggered[5]) {
-                m_longPressTriggered[5] = true;
-                unlock();
-            }
-        } else {
-            m_longPressTriggered[5] = false;
-        }
+        handleModule(0);  // 模块1用于解锁
         return;
     }
 
-    // 正常工作模式
-    for (int i = 0; i < 5; i++) {  // 0-4是功能键，不包括LOCK
-        bool state = digitalRead(m_touchPins[i]) == HIGH;
-        unsigned long now = millis();
+    handleModule(0);  // 模块1 - 播放控制
+    handleModule(1);  // 模块2 - 音量/开关
+}
 
-        if (state && !m_touchStates[i]) {
-            // 触摸按下
-            m_touchStates[i] = true;
-            m_touchPressTime[i] = now;
-            m_longPressTriggered[i] = false;
-            m_longPress2Triggered[i] = false;
+void TouchHandler::handleModule(uint8_t index) {
+    const uint8_t pin = (index == 0) ? TOUCH_PIN_1 : TOUCH_PIN_2;
+    TouchModule& mod = m_modules[index];
+    unsigned long now = millis();
 
-        } else if (!state && m_touchStates[i]) {
-            // 触摸释放
-            m_touchStates[i] = false;
+    bool state = digitalRead(pin) == HIGH;
 
-            // 判断是单击还是长按释放
-            unsigned long pressDuration = now - m_touchPressTime[i];
+    if (state && !mod.pressed) {
+        // 触摸按下
+        mod.pressed = true;
+        mod.pressTime = now;
+        mod.longPress1Triggered = false;
+        mod.longPress2Triggered = false;
+        mod.longPress3Triggered = false;
 
-            if (pressDuration < 500) {
-                // 短按 - 处理点击事件
-                processTap(i);
-            }
-            // 长按触发后释放不处理点击
+    } else if (!state && mod.pressed) {
+        // 触摸释放
+        mod.pressed = false;
+        unsigned long duration = now - mod.pressTime;
 
-        } else if (state && m_touchStates[i]) {
-            // 持续触摸 - 检测长按
-            unsigned long pressDuration = now - m_touchPressTime[i];
-
-            // 长按2秒 - 开关机
-            if (pressDuration >= LONG_PRESS_TIME_2 && !m_longPress2Triggered[i]) {
-                m_longPress2Triggered[i] = true;
-                if (i == 0 || i == 4) {  // PLAY_PAUSE 或 POWER
-                    m_amplifier->powerToggle();
-                }
-            }
-            // 长按1秒 - 音量+
-            else if (pressDuration >= LONG_PRESS_TIME_1 && !m_longPressTriggered[i]) {
-                m_longPressTriggered[i] = true;
-                if (i == 2) {  // VOL_UP
-                    m_amplifier->volumeUp();
-                } else if (i == 3) {  // VOL_DOWN
-                    m_amplifier->volumeDown();
-                }
-            }
+        if (duration < 500) {
+            // 短按 - 处理点击事件
+            processTap(index);
         }
     }
 
-    // 处理LOCK键（在非锁屏模式）
-    bool lockState = digitalRead(TOUCH_PIN_LOCK) == HIGH;
-    unsigned long now = millis();
+    // 持续触摸 - 长按检测
+    if (mod.pressed) {
+        unsigned long duration = now - mod.pressTime;
 
-    if (lockState && !m_touchStates[5]) {
-        m_touchStates[5] = true;
-        m_touchPressTime[5] = now;
-        m_longPressTriggered[5] = false;
-    } else if (!lockState && m_touchStates[5]) {
-        m_touchStates[5] = false;
-
-        unsigned long pressDuration = now - m_touchPressTime[5];
-
-        if (pressDuration < 500) {
-            // 短按 - 处理双击锁屏
-            if (now - m_lastTapTime[5] < TAP_TIMEOUT) {
-                m_tapCount[5]++;
-                if (m_tapCount[5] >= 2) {
-                    lock();
-                    m_tapCount[5] = 0;
-                }
-            } else {
-                m_tapCount[5] = 1;
-            }
-            m_lastTapTime[5] = now;
-        }
-    } else if (lockState && m_touchStates[5]) {
-        // 长按3秒锁屏
-        if (now - m_touchPressTime[5] >= LONG_PRESS_TIME_3 && !m_longPressTriggered[5]) {
-            m_longPressTriggered[5] = true;
+        // 长按3秒 - 锁屏/解锁
+        if (duration >= LONG_PRESS_TIME_3 && !mod.longPress3Triggered) {
+            mod.longPress3Triggered = true;
             lock();
+        }
+        // 长按2秒 - 开关机 (仅模块2)
+        else if (duration >= LONG_PRESS_TIME_2 && !mod.longPress2Triggered && index == 1) {
+            mod.longPress2Triggered = true;
+            m_amplifier->powerToggle();
+        }
+        // 长按1秒 - 音量+ (模块1) 或 音量- (模块2)
+        else if (duration >= LONG_PRESS_TIME_1 && !mod.longPress1Triggered) {
+            mod.longPress1Triggered = true;
+            if (index == 0) {
+                m_amplifier->volumeUp();
+            } else {
+                m_amplifier->volumeDown();
+            }
         }
     }
 }
 
 void TouchHandler::processTap(uint8_t index) {
     unsigned long now = millis();
+    TouchModule& mod = m_modules[index];
 
-    // 双击检测
-    if (now - m_lastTapTime[index] < TAP_TIMEOUT) {
-        m_tapCount[index]++;
+    // 判断点击次数
+    if (now - mod.lastTapTime < TAP_TIMEOUT) {
+        mod.tapCount++;
     } else {
-        m_tapCount[index] = 1;
+        mod.tapCount = 1;
     }
-    m_lastTapTime[index] = now;
+    mod.lastTapTime = now;
 
-    // 根据触摸次数处理
-    switch (index) {
-        case 0: // PLAY_PAUSE - 单击暂停/播放
-            if (m_tapCount[index] == 1) {
+    if (index == 0) {
+        // 模块1: 单击=暂停/播放, 双击=下一首, 三击=锁屏
+        switch (mod.tapCount) {
+            case 1:
                 m_amplifier->playPause();
-            }
-            m_tapCount[index] = 0;
-            break;
-
-        case 1: // NEXT - 单击下一首
-            if (m_tapCount[index] == 1) {
+                break;
+            case 2:
                 m_amplifier->nextTrack();
-            }
-            m_tapCount[index] = 0;
-            break;
-
-        case 2: // VOL_UP - 单击音量+
-        case 3: // VOL_DOWN - 单击音量-
-            // 单击已在长按处理
-            m_tapCount[index] = 0;
-            break;
-
-        default:
-            m_tapCount[index] = 0;
-            break;
+                break;
+            case 3:
+                lock();
+                break;
+        }
+        if (mod.tapCount >= 3) {
+            mod.tapCount = 0;
+        }
+    } else {
+        // 模块2: 单击=暂停/播放, 双击=下一首
+        switch (mod.tapCount) {
+            case 1:
+                m_amplifier->playPause();
+                break;
+            case 2:
+                m_amplifier->nextTrack();
+                break;
+        }
+        if (mod.tapCount >= 2) {
+            mod.tapCount = 0;
+        }
     }
 }
 
 void TouchHandler::lock() {
     m_locked = true;
     m_lockUnlockTime = millis();
-    Serial.println("[SYSTEM] Locked - Entering deep sleep mode");
+    Serial.println("[SYSTEM] Locked - Entering deep sleep");
 }
 
 void TouchHandler::unlock() {
@@ -194,11 +129,12 @@ void TouchHandler::unlock() {
     m_lockUnlockTime = millis();
     Serial.println("[SYSTEM] Unlocked - Wake from deep sleep");
 
-    // 重置所有触摸状态
-    for (int i = 0; i < 6; i++) {
-        m_tapCount[i] = 0;
-        m_lastTapTime[i] = 0;
-        m_longPressTriggered[i] = false;
-        m_longPress2Triggered[i] = false;
+    // 重置状态
+    for (int i = 0; i < 2; i++) {
+        m_modules[i].tapCount = 0;
+        m_modules[i].lastTapTime = 0;
+        m_modules[i].longPress1Triggered = false;
+        m_modules[i].longPress2Triggered = false;
+        m_modules[i].longPress3Triggered = false;
     }
 }
